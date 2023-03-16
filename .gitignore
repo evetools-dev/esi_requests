@@ -127,3 +127,12 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# esi specific files
+token.json
+.vscode
+.deleter
+static
+*.db
+*.json
+!application.json

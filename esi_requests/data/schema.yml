@@ -1,0 +1,14 @@
+cache:
+  tables: [checker_cache, etag]
+  checker_cache:
+    schema:
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      expires TIMESTAMP NOT NULL
+  etag:
+    schema:
+      # key: url
+      # value: etag + response
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      expires TIMESTAMP NOT NULL
