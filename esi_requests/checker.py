@@ -13,10 +13,10 @@ from .data.utils import make_cache_key
 from .exceptions import EndpointDownError, InvalidRequestError
 from .log import getLogger
 from .metadata import ESIMetadata
-from .models import ESIRequest, ESIResponse
+from .models import ESIRequest
 
 if TYPE_CHECKING:
-    from .models import PreparedESIRequest
+    from .models import PreparedESIRequest, ESIResponse
     
 
 logger = getLogger(__name__)
@@ -104,12 +104,12 @@ class ESIRequestChecker(metaclass=_NonOverridable):
 
         self.metadata_parser = ESIMetadata()
 
-    async def __call__(self, api_request: ESIRequest, raise_flag: bool = False) -> bool:
+    async def __call__(self, request: "PreparedESIRequest", raise_flag: bool = False) -> bool:
         if not self.enabled:
             return True
 
         self.raise_flag = raise_flag
-        return await self.__check_request(api_request)
+        return await self.__check_request(request)
 
     async def __check_request(self, request: "PreparedESIRequest") -> bool:
         """Checks if an ESIRequest is valid.
@@ -202,9 +202,6 @@ class ESIRequestChecker(metaclass=_NonOverridable):
 
         return valid
 
-    def generate_fake_response(self, incorrect_param: str, _in: str) -> ESIResponse:
-        pass
-
     def __log(self, api_request: ESIRequest):
         logger.warning(
             'BLOCKED - endpoint_"%s": %s',
@@ -258,3 +255,23 @@ class ESIEndpointChecker:
     @staticmethod
     def _parse_status_json(status) -> Dict:
         return {entry["route"]: True if entry["status"] == "green" else False for entry in status}
+
+
+class FakeResponseGenerator:
+
+    def __init__(self):
+        self.cache: Dict[ESIRequest, ESIResponse] = {}
+
+    def __call__(self, *args, **kwargs):
+        return self.generate()
+
+    def ready(self, request: "PreparedESIRequest") -> bool:
+        return False
+
+    def generate(self, request: "PreparedESIRequest") -> "ESIResponse":
+        """Generates a fake response for a given PreparedESIRequest.
+
+        Returns:
+            ESIResponse: a fake response for a given request.
+        """
+        return ESIResponse()
