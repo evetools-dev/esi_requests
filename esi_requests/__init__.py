@@ -1,1 +1,1 @@
-from .api import get, head
+from .api import get, head, request, arequest

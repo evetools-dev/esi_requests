@@ -31,8 +31,8 @@ class Session:
 
     Usage:
     ```python
-    with Session() as session:
-        response = session.request("get", "/markets/{region_id}/orders/", region_id=10000002)
+    async with Session() as session:
+        response = await session.request("get", "/markets/{region_id}/orders/", region_id=10000002)
         # Use ESIResponse object
     ```
 
@@ -43,27 +43,8 @@ class Session:
 
     Attributes:
         None.
-
-    Methods:
-        __enter__(): Context manager method used to enter the session.
-        __exit__(): Context manager method used to exit the session.
-        request(method: str, endpoint: str, **kwargs) -> Union[ESIResponse, List[ESIResponse]]: 
-            Method used to send a request to the ESI API.
-        prepare_request(request: ESIRequest) -> List[PreparedESIRequest]:
-            Method used to prepare a request for sending to the ESI API.
-        issue(requests: List[PreparedESIRequest]) -> List[ESIResponse]:
-            Method used to issue one or more prepared requests to the ESI API.
-        issue_one_request(request: PreparedESIRequest, try_count: int = 0) -> ESIResponse:
-            Method used to issue a single prepared request to the ESI API, with retrying if necessary.
-        send(request: PreparedESIRequest, **kwargs) -> aiohttp.ClientResponse:
-            Method used to send a prepared request to the ESI API.
-        build_response(request: ESIRequest, r: aiohttp.ClientResponse) -> ESIResponse:
-            Method used to build an ESIResponse object from an aiohttp response object.
-        cache_response(resp: ESIResponse) -> None:
-            Method used to cache an ESIResponse object in the session's ETag cache.
-        close() -> None:
-            Method used to close the session.
     """
+
     def __init__(self) -> None:
         self.__request_checker = ESIRequestChecker()
         self.__request_parser = ESIRequestParser()
@@ -71,29 +52,48 @@ class Session:
         self.__request_generator = FakeResponseGenerator()
 
         self.__async_session = None
-        self.__async_event_loop = asyncio.get_event_loop()
+        # self.__async_event_loop = asyncio.get_event_loop()
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    async def __aexit__(self, *args):
+        await self.close()
 
-    def request(self, method: str, endpoint: str, **kwargs) -> Union["ESIResponse", List["ESIResponse"]]:
-        
+    async def request(
+        self, method: str, endpoint: str, **kwargs
+    ) -> Union["ESIResponse", List["ESIResponse"]]:
+        """Sends a request to the ESI API and returns one or more ``ESIResponse`` objects.
+
+        Args:
+            method (str): The HTTP method to use (e.g. "GET", "POST").
+            endpoint (str): The endpoint to send the request to (e.g. "/characters/{character_id}/assets/").
+            **kwargs: Optional arguments to pass to the request, such as query parameters.
+
+        Returns:
+            Either a single ``ESIResponse`` object, or a list of ``ESIResponse`` objects if multiple requests were issued.
+
+        Note:
+            This method automatically handles request validation, ETag caching, and retrying failed requests.
+        """
         headers = kwargs.pop("headers", {})
         params = kwargs.pop("params", {})
 
         request = ESIRequest(endpoint=endpoint, method=method, params=params, headers=headers, **kwargs)
 
         preps = self.prepare_request(request)
-        
-        result = self.__async_event_loop.run_until_complete(self.issue(preps))
+
+        result = await self.issue(preps)
         if len(result) == 1:
             return result[0]
         return result
 
     def prepare_request(self, request: "ESIRequest") -> List["PreparedESIRequest"]:
+        """Prepares an ``ESIRequest`` for sending to the ESI API.
+
+        Returns:
+            A list of ``PreparedESIRequest`` objects, which can be passed to ``Session.issue()``.
+        """
         requests = self.__request_parser(request)
 
         # Update ETag headers
@@ -104,21 +104,42 @@ class Session:
 
         request.prepared = True
         return requests
-    
-    async def issue(self, requests: List["PreparedESIRequest"]):
+
+    async def issue(self, requests: List["PreparedESIRequest"]) -> List["ESIResponse"]:
+        """Issues one or more prepared requests to the ESI API.
+
+        Returns:
+            List[ESIResponse]: A list of ``ESIResponse`` objects corresponding to each prepared request.
+
+        Raises:
+            ValueError: If a request in the provided list is not an instance of PreparedESIRequest.
+        """
         if not isinstance(requests[0], PreparedESIRequest):
-            raise ValueError("You can only issue PreparedESIRequest. Use Session.prepare_request() before issue.")
+            raise ValueError(
+                "You can only issue PreparedESIRequest. Use Session.prepare_request() before issue."
+            )
 
         if self.__async_session is None:
             self.__async_session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
-        
+
         tasks = [asyncio.create_task(self.issue_one_request(request)) for request in requests]
-        await tqdm_asyncio.gather(*tasks)
+        await tqdm_asyncio.gather(*tasks)  # progress bar
 
         return [task.result() for task in tasks]
-        
-    
-    async def issue_one_request(self, request: "PreparedESIRequest"):
+
+    async def issue_one_request(self, request: "PreparedESIRequest") -> "ESIResponse":
+        """Issues a single prepared request to the ESI API and returns the corresponding ``ESIResponse``.
+
+        Args:
+            request (``PreparedESIRequest``): The prepared request to send to the ESI API.
+
+        Returns:
+            ESIResponse: The ``ESIResponse`` corresponding to the request.
+
+        This asynchronous method first checks if the request would cause an error on the ESI side.
+        If the request would cause an error, an ``ESIResponse`` object will be generated as if the request is sent to ESI.
+        Otherwise, the method will send the request, and cache the ``ESIResponse`` if necessary.
+        """
         # Checks if request would cause error on ESI side
         valid = await self.__request_checker(request)
 
@@ -126,7 +147,7 @@ class Session:
             # If the request would cause error, the request would not be sent to ESI.
             # But still, a ESIResponse will be generated, and this request "appears" to be sent to ESI.
             resp: "ESIResponse" = self.__request_generator.generate()
-        
+
         else:
             # First send the request, then check for ETag
             r = await self.send(request)
@@ -137,10 +158,12 @@ class Session:
                 if cache_line is None:
                     # TODO: I don't know how to handle cache miss when 304,
                     # if someone could help it would be appreciated
-                    raise NotImplementedError("Not sure how to handle this situation... Please create a Issue on GitHub.")
-                
+                    raise NotImplementedError(
+                        "Not sure how to handle this situation... Please create a Issue on GitHub."
+                    )
+
                 resp = cache_line.response
-            
+
             else:
                 resp = await self.build_response(request, r)
                 if resp.ok:
@@ -149,6 +172,7 @@ class Session:
         return resp
 
     async def send(self, request: "PreparedESIRequest", **kwargs):
+        """Sends a prepared request to the ESI API."""
         if isinstance(request, ESIRequest):
             raise ValueError("You can only send ESIRequest that is prepared by Session.prepare.")
 
@@ -159,6 +183,7 @@ class Session:
             return resp
 
     async def build_response(self, request: "ESIRequest", r: "aiohttp.ClientResponse") -> "ESIResponse":
+        """Builds an ``ESIResponse`` object from an ``aiohttp.ClientResponse`` object."""
         resp = ESIResponse()
 
         # aiohttp always gives a status
@@ -177,19 +202,22 @@ class Session:
         return resp
 
     def cache_response(self, resp: "ESIResponse"):
+        """Caches an ``ESIResponse`` object in the ETag cache."""
         etag = resp.headers.get("ETag", "*")
         expires = resp.headers.get("Expires", 24 * 3600)  # 1 day
         self.__etag_cache.set(resp.url, etag=etag, response=resp, expires=expires)
 
-    def close(self):
+    async def close(self):
         if self.__async_session is None:
             return
 
-        if not self.__async_session.closed:
-            if self.__async_session._connector_owner:
-                self.__async_session._connector._close()  # silence deprecation warning
-            self.__async_session._connector = None
+        await self.__async_session.close()
 
-        if not self.__async_event_loop.is_closed():
-            self.__async_event_loop.run_until_complete(asyncio.sleep(0))
-            self.__async_event_loop.close()
+        # if not self.__async_session.closed:
+        #     if self.__async_session._connector_owner:
+        #         self.__async_session._connector._close()  # silence deprecation warning
+        #     self.__async_session._connector = None
+
+        # if not self.__async_event_loop.is_closed():
+        #     self.__async_event_loop.run_until_complete(asyncio.sleep(0))
+        #     self.__async_event_loop.close()
