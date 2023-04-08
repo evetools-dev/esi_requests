@@ -134,5 +134,6 @@ token.json
 .deleter
 static
 *.db
+*.lock
 *.json
 !application.json
