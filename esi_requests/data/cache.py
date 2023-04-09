@@ -64,7 +64,7 @@ class SqliteCache(BaseCache):
 
     This cache has a key-value interface.
     Specifically, all table has:
-    1. primary key called ``key``
+    1. ``key``: any ``pickle``able object
     2. ``value``: an arbitrary object serialized by ``pickle.dumps``
     3. ``expires``: retrieved from ``Expires`` headers of HTTP response
 
@@ -76,17 +76,22 @@ class SqliteCache(BaseCache):
         It deletes within 5 minutes after this ``expires`` time is reached.
     """
 
-    def __init__(self, esidb: ESIDBManager, table: str):
-        self.c = esidb
+    def __init__(self, name: str, table: str):
+        self.cache_name = name
         self.table = table
-        self.buffer = InsertBuffer(self.c)
+
+        self.db = ESIDBManager(name)
+        self.buffer = InsertBuffer(self.db)
+        self.deleter = _DeleteHandler(self.db, self.table)
+
+        self.db.prepare_table(table, schema="cache")
         atexit.register(self.buffer.flush)
-        self.deleter = _DeleteHandler(self.c, self.table)
         atexit.register(self.deleter.save)
 
         self._last_used = None  # used for testing
-        super().__init__(esidb, table)
-        logger.info("SqliteCache initiated: %s-%s", esidb.db_name, table)
+        super().__init__(self.db, table)
+
+        logger.info("SqliteCache initiated at database %s and table %s", self.db.db_name, table)
 
     def set(self, key, value, expires: Union[str, int] = 1200):
         """Sets k/v cache line.
@@ -127,7 +132,7 @@ class SqliteCache(BaseCache):
         row = self.buffer.select(_h)  # hash should be unique, so no need use table parameter
         if not row:
             # should use fetchall and select the newest
-            row = self.c.execute(f"SELECT * FROM {self.table} WHERE key=?", (_h,)).fetchone()
+            row = self.db.execute(f"SELECT * FROM {self.table} WHERE key=?", (_h,)).fetchone()
         if not row:
             logger.debug("Cache MISS: %s", _h)
             self.miss += 1
@@ -140,8 +145,8 @@ class SqliteCache(BaseCache):
         if datetime.utcnow() > expires:
             logger.debug("Cache EXPIRED: %s", _h)
             self.miss += 1
-            self.c.execute(f"DELETE FROM {self.table} WHERE key=?", (_h,))
-            self.c.commit()
+            self.db.execute(f"DELETE FROM {self.table} WHERE key=?", (_h,))
+            self.db.commit()
             return default  # expired
         else:
             self._last_used = _h
@@ -152,6 +157,6 @@ class SqliteCache(BaseCache):
     def evict(self, key):
         """Deletes cache entry with key. Useful in testing."""
         _h = hash_key(key)
-        self.c.execute(f"DELETE FROM {self.table} WHERE key=?", (_h,))
-        self.c.commit()
+        self.db.execute(f"DELETE FROM {self.table} WHERE key=?", (_h,))
+        self.db.commit()
         logger.debug("Cache entry evicted: %s", _h)

@@ -58,51 +58,43 @@ class _ESIDBStats:
 
 
 class ESIDBManager:
-    """Manage sqlite3 database for ESI api.
+    """Manages an SQLite database.
 
-    Currently ESIDB is used to cache market api requests, which usually needs hundreds of ESI API calls.
-    ESIDB is also useful to store time sensitive data, such as market data, which could be used for analysis.
-
-    Attributes:
-        db_name: str
-            Name of the database. If db_name is abc, the db file is named as "abc.db".
-        parent_dir: str
-            Location of the database file. Default under eve_tools/data/.
-        schema: str
-            Uses which schema predefined in schema.yaml. Default using schema with name db_name.
+    Parameters:
+        db_name (str): name of the database. The database file will be named as ``db_name.db``.
     """
 
-    def __init__(self, db_name, schema: str = None):
+    def __init__(self, db_name):
         self.db_name = db_name
-        self.schema = schema
-        if schema is None:
-            self.schema = db_name
 
         self.db_path = os.path.join(os.path.dirname(__file__), db_name + ".db")
         self.conn = sqlite3.connect(self.db_path)  # can't use isolation_level=None
-        self._cursor = self.conn.cursor()
+        self.cursor = self.conn.cursor()
 
         self.__init_tables()
-        self.__init_columns()
-        self.__init_stats()
-        logger.info("DB initiated with schema %s: %s @ %s", schema, db_name, self.db_path)
+        self.__init_stats()  # self.tables
+        logger.info("Database %s initiated at path %s", db_name, self.db_path)
 
     def __del__(self):
         self.close()
 
     @property
     def stats(self) -> _ESIDBStats:
+        """Get statistics on database query performance."""
         return self._stats
 
     def execute(self, __sql: str, __parameters=...) -> sqlite3.Cursor:
-        """Wraps cursor.execute with custom add-ons.
-        Usage is the same (or should be the same) as cursor.execute() method of sqlite3.Cursor class."""
+        """Executes an SQL statement.
+        
+        Wraps cursor.execute with custom add-ons.
+        Usage is the same (or should be the same) as cursor.execute() method of sqlite3.Cursor class.
+        """
         cmd = __sql.split()[0]
         _s = time.perf_counter_ns()  # perf_counter has 1e-07 resolution in win32, lowest in time methods
         if __parameters is Ellipsis:
-            cursor = self._cursor.execute(__sql)
+            cursor = self.cursor.execute(__sql)
         else:
-            cursor = self._cursor.execute(__sql, __parameters)
+            cursor = self.cursor.execute(__sql, __parameters)
         _t = time.perf_counter_ns() - _s
         self._stats.increment(cmd, _t)
         return cursor
@@ -111,45 +103,56 @@ class ESIDBManager:
         """Same as connection.commit() from sqlite3.Connection class."""
         self.conn.commit()
 
+    def prepare_table(self, table_name: str, schema: str):
+        """Prepares a table by creating it if not exists."""
+        if table_name not in self.tables:
+            # Read schema from schema.yml
+            with open(os.path.join(os.path.dirname(__file__), "schema.yml")) as f:
+                schema = yaml.full_load(f).get(schema)
+                if schema is None:
+                    raise ValueError(f"Schema {schema} not found in schema.yml")
+
+            self.cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({schema});")
+            self.tables.append(table_name)
+        else:
+            logger.debug("Database %s already has table \"%s\"", self.db_name, table_name)
+
     def clear_table(self, table_name: str):
-        """Clears a table using DELETE FROM table"""
-        self._cursor.execute(f"DELETE FROM {table_name};")
+        """Clears a table using ``DELETE FROM table_name;``"""
+        self.cursor.execute(f"DELETE FROM {table_name};")
         self.conn.commit()
         logger.debug("Clear table %s-%s successful", self.db_name, table_name)
 
     def drop_table(self, table_name: str):
-        """Drops a table using DROP TABLE table"""
-        self._cursor.execute(f"DROP TABLE IF EXISTS {table_name};")
+        """Drops a table using ``DROP TABLE table_name;``"""
+        self.cursor.execute(f"DROP TABLE IF EXISTS {table_name};")
         self.conn.commit()
         logger.debug("Drop table %s-%s successful", self.db_name, table_name)
 
     def clear_db(self):
-        """Clears tables of db by calling clear_table() on every table."""
+        """Clears every table by calling ``clear_table()``."""
         for table in self.tables:
             self.clear_table(table)
         logger.debug("Clear DB %s successful", self.db_name)
 
     def close(self):
-        self._cursor.close()
+        """Close the database connection and cursor."""
+        self.cursor.close()
         self.conn.close()
-
-    def __init_columns(self):
-        ret = {}
-        for table in self.tables:
-            cur = self.conn.execute(f"SELECT * FROM {table}")
-            names = list(map(lambda x: x[0], cur.description))
-            ret[table] = names
-        self.columns = ret
-
+    
     def __init_tables(self):
-        with open(os.path.join(os.path.dirname(__file__), "schema.yml")) as f:
-            dbconfig = yaml.full_load(f)
-        self._dbconfig = dbconfig.get(self.schema)
-        self.tables = self._dbconfig.get("tables")
-        for table in self.tables:
-            table_config = self._dbconfig.get(table)
-            schema = table_config.get("schema")
-            self._cursor.execute(f"CREATE TABLE IF NOT EXISTS {table} ({schema});")
+        # with open(os.path.join(os.path.dirname(__file__), "schema.yml")) as f:
+        #     dbconfig = yaml.full_load(f)
+        # self._dbconfig = dbconfig.get(self.schema)
+        # self.tables = self._dbconfig.get("tables")
+        # for table in self.tables:
+        #     table_config = self._dbconfig.get(table)
+        #     schema = table_config.get("schema")
+        #     self.cursor.execute(f"CREATE TABLE IF NOT EXISTS {table} ({schema});")
+        
+        # Get existing table names
+        cursor = self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        self.tables = [t[0] for t in cursor.fetchall()]
 
     def __init_stats(self):
         self._stats: _ESIDBStats = _ESIDBStats(self.db_name)

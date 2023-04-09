@@ -143,10 +143,10 @@ class Session:
         # Checks if request would cause error on ESI side
         valid = await self.__request_checker(request)
 
-        if not valid and self.__request_generator.ready(request):
+        if not valid:
             # If the request would cause error, the request would not be sent to ESI.
             # But still, a ESIResponse will be generated, and this request "appears" to be sent to ESI.
-            resp: "ESIResponse" = self.__request_generator.generate()
+            resp: "ESIResponse" = self.__request_generator.generate(request)
 
         else:
             # First send the request, then check for ETag
@@ -212,6 +212,7 @@ class Session:
             return
 
         await self.__async_session.close()
+        await self.__request_checker.close()
 
         # if not self.__async_session.closed:
         #     if self.__async_session._connector_owner:

@@ -8,7 +8,7 @@ import aiohttp
 import pandas as pd
 import requests
 
-from .data import CacheDB, SqliteCache
+from .data import SqliteCache
 from .data.utils import make_cache_key
 from .exceptions import EndpointDownError, InvalidRequestError
 from .log import getLogger
@@ -75,38 +75,33 @@ class ESIRequestChecker(metaclass=_NonOverridable):
     # It seems like if the parameter to be checked is in path (appears as {xxx_id} in endpoint name),
     # incorrect value would cause a 404 error.
     # Instead, if the parameter is in query, an empty response body would be given (probably  database select returns nothing).
-    def __init__(self, cache: SqliteCache = ...) -> None:
+    def __init__(self, cache: "SqliteCache" = ...) -> None:
         self.enabled = True
         self.raise_flag = False
-        self.requests = 0  # just for fun
+
         self.endpoints_checker = ESIEndpointChecker()
-
-        if cache is Ellipsis:
-            self.cache = SqliteCache(CacheDB, "checker_cache")
-        else:
-            self.cache = cache
-
-        # Reading a .csv.bz2 is costly. Takes 15MB memory and a long time (~0.x second)
-        # Retrieve from Fuzzwork if local copy not exists
-        static_path = os.path.join(os.path.dirname(__file__), "data", "static")
-        if not os.path.isdir(static_path):
-            try:
-                os.mkdir(static_path)
-            except FileExistsError:
-                pass
-        invTypes_path = os.path.join(static_path, "invTypes.csv.bz2")
-        if not os.path.exists(invTypes_path):
-            resp = requests.get("https://www.fuzzwork.co.uk/dump/latest/invTypes.csv.bz2")
-            with open(invTypes_path, "wb") as f:
-                f.write(resp.content)
-            
-        self.invTypes = pd.read_csv(invTypes_path)
-
         self.metadata_parser = ESIMetadata()
+
+        self.cache = SqliteCache("request_cache", "request_checker") if cache is Ellipsis else cache
+        self.invTypes = self.__load_sde()
+
+        self._requests_made = 0  # just for fun
+        self.__async_session = None
+
+    def generate(self, request: "PreparedESIRequest") -> "ESIResponse":
+        """Generates a fake response for a given PreparedESIRequest.
+
+        Returns:
+            ESIResponse: a fake response for a given request.
+        """
+        return ESIResponse()
 
     async def __call__(self, request: "PreparedESIRequest", raise_flag: bool = False) -> bool:
         if not self.enabled:
             return True
+        
+        if self.__async_session is None:
+            self.__async_session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
 
         self.raise_flag = raise_flag
         return await self.__check_request(request)
@@ -170,9 +165,7 @@ class ESIRequestChecker(metaclass=_NonOverridable):
     async def check_type_id(self, type_id: int) -> bool:
         """Checks if a type_id is valid.
 
-        Uses type_id from api_request.kwd.
-        First checks using SDE, then checks using ESI endpoint if SDE passed.
-        This method is independent from api/check and api/search.
+        First checks using SDE, then checks using ESI endpoint.
 
         Note:
             This method is cached for one month.
@@ -184,23 +177,43 @@ class ESIRequestChecker(metaclass=_NonOverridable):
             valid = bool(int(invType["published"]))
 
         if valid is True:
-            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-                success = False
-                attempts = 3
-                while not success and attempts > 0:
-                    async with session.get(
-                        f"https://esi.evetech.net/latest/universe/types/{type_id}/?datasource=tranquility&language=en",
-                    ) as resp:
-                        if resp.status == 502:
-                            attempts -= 1
-                            continue
-                        if resp.status == 200:
-                            success = True
-                        data: dict = await resp.json()
-                        self.requests += 1
-                        valid = data.get("published")
+            success = False
+            attempts = 3
+            while not success and attempts > 0:
+                async with self.__async_session.get(
+                    f"https://esi.evetech.net/latest/universe/types/{type_id}/?datasource=tranquility&language=en",
+                ) as resp:
+                    if resp.status == 502:
+                        attempts -= 1
+                        continue
+                    if resp.status == 200:
+                        success = True
+                    data: dict = await resp.json()
+                    self._requests_made += 1
+                    valid = data.get("published")
 
         return valid
+    
+    async def close(self):
+        if self.__async_session is not None:
+            await self.__async_session.close()
+    
+    def __load_sde(self) -> pd.DataFrame:
+        # Reading a .csv.bz2 is costly. Takes 15MB memory and a long time (~0.x second)
+        # Retrieve from Fuzzwork if local copy not exists
+        static_path = os.path.join(os.path.dirname(__file__), "data", "static")
+        if not os.path.isdir(static_path):
+            try:
+                os.mkdir(static_path)
+            except FileExistsError:
+                pass
+        invTypes_path = os.path.join(static_path, "invTypes.csv.bz2")
+        if not os.path.exists(invTypes_path):
+            resp = requests.get("https://www.fuzzwork.co.uk/dump/latest/invTypes.csv.bz2")
+            with open(invTypes_path, "wb") as f:
+                f.write(resp.content)
+            
+        return pd.read_csv(invTypes_path)
 
     def __log(self, api_request: ESIRequest):
         logger.warning(
@@ -211,7 +224,7 @@ class ESIRequestChecker(metaclass=_NonOverridable):
 
 
 class ESIEndpointChecker:
-    """Checks status of ESI endpoints.
+    """Checks status of an ESI endpoint.
 
     Note:
         This method does not follow the ``expires`` field in response header.
