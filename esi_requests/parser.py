@@ -9,7 +9,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
 
-from .data import CacheDB, SqliteCache
 from .log import getLogger
 from .metadata import ESIMetadata
 from .models import PreparedESIRequest
@@ -42,10 +41,6 @@ class ESIRequestParser:
     def __init__(self) -> None:
         self.metadata_parser = ESIMetadata()
         self.apps = ESIApplications()
-
-        self.etag_cache = SqliteCache(CacheDB, table="etag_cache")
-
-        self.user_agent = "python-eve_tools/ESIClient"
 
     def __call__(self, request: "ESIRequest") -> List["PreparedESIRequest"]:
         """Parses user input ``key``, ``method``, and keywords to a ``ESIRequest``.
@@ -261,28 +256,6 @@ class ESIRequestParser:
         loop_through = {param: kwargs[param] for param in kwargs if should_loop_or_not(kwargs[param])}
 
         return loop_through
-
-    def _get_etag(self, request_id: tuple) -> str:
-        """Gets etag value for a request.
-
-        If no matching etag, returns empty string."""
-        etag: ETagEntry = self.etag_cache.get(request_id)
-        return etag.etag if etag is not None and etag.etag is not None else ""
-
-    def _get_etag_payload(self, request_id: tuple) -> str:
-        """Gets response content for request with ``request_id``.
-
-        Use this method when ESI returns ``status: 304``."""
-        etag: ETagEntry = self.etag_cache.get(request_id)
-        return etag.payload if etag is not None else None
-
-    def _set_etag(self, request_id: tuple, etag: str, payload: Any) -> None:
-        """Sets cache entry with key: ``request_id``, value: ``ETagEntry(etag, payload)``."""
-        value = ETagEntry(etag, payload)
-        # An expires param is given for safety.
-        # If for example response content has updated, this ``set`` would update etag for a request.
-        # If for example a request is rare, this request's etag would be deleted after 7 days (reasonably long time).
-        self.etag_cache.set(request_id, value, 24 * 3600 * 7)
 
     def __check_method(self, metadata: "EndpointMetadata", method: str) -> None:
         """Checks if request method is supported by ESI.
