@@ -19,8 +19,9 @@ from typing import List, Union
 import aiohttp
 from tqdm.asyncio import tqdm_asyncio
 
-from .checker import ESIRequestChecker, FakeResponseGenerator
+from .checker import ESIRequestChecker, FakeResponseGenerator, ESIEndpointChecker
 from .data.etag_cache import ETagCache
+from .exceptions import EndpointDownError
 from .models import ESIRequest, ESIResponse, PreparedESIRequest
 from .parser import ESIRequestParser
 
@@ -50,9 +51,13 @@ class Session:
         self.__request_parser = ESIRequestParser()
         self.__etag_cache = ETagCache()
         self.__request_generator = FakeResponseGenerator()
+        self.__endpoint_checker = ESIEndpointChecker()
 
         self.__async_session = None
         # self.__async_event_loop = asyncio.get_event_loop()
+
+        # Due to the complex nature of parameter checking, we disable it by default.
+        self.__request_checker.enabled = False
 
     async def __aenter__(self):
         return self
@@ -78,6 +83,10 @@ class Session:
         """
         headers = kwargs.pop("headers", {})
         params = kwargs.pop("params", {})
+
+        # Checks if the endpoint is valid
+        if not self.__endpoint_checker.check(endpoint):
+            raise EndpointDownError(endpoint)
 
         request = ESIRequest(endpoint=endpoint, method=method, params=params, headers=headers, **kwargs)
 
@@ -141,6 +150,7 @@ class Session:
         Otherwise, the method will send the request, and cache the ``ESIResponse`` if necessary.
         """
         # Checks if request would cause error on ESI side
+        # If checker is disabled, it will always return True
         valid = await self.__request_checker(request)
 
         if not valid:

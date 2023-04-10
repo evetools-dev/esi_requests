@@ -65,5 +65,13 @@ class ESIParams:
 
         return None
 
+    def __contains__(self, name: str) -> bool:
+        """Returns True if Param with ``name`` exists."""
+        for p in self.params:
+            if p.name == name:
+                return True
+
+        return False
+
     def __iter__(self):
         yield from self.params

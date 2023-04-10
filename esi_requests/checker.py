@@ -56,45 +56,38 @@ class _NonOverridable(type):
 
 
 class ESIRequestChecker(metaclass=_NonOverridable):
-    """Checks a request for validity.
+    """Checks if a request would cause an error on ESI side.
 
-    Checks various parameters to avoid errors from ESI.
-    The expectation is to completely eliminate 400 and 404 errors in stable state.
-    All checkers only check according to some rules, having no feedback loop from ``ESIResponse``.
-
-    User could override individual check methods to customize checking rules.
-    ``__call__`` and ``__check_request`` methods are not allowed to override.
-
-    Attributes:
-        cache: SqliteCache
-            A cache instance to store the check result. If not given, default ``checker_cache`` under ``eve_tools/data/cache.db``.
+    Rule-based parameter checking to avoid errors from ESI.
+    The goal is to completely eliminate 400 and 404 errors in stable state.
 
     Note:
-        Individual check methods should be async functions, and should be decorated by ``cache_check_request`` from ``eve_tools.ESI``.
+        Individual check methods should be async functions, and could be decorated by ``cache_check_request``.
+        User could override individual check methods to customize checking rules.
+        ``__call__`` and ``__check_request`` methods are not allowed to override.
     """
     # It seems like if the parameter to be checked is in path (appears as {xxx_id} in endpoint name),
     # incorrect value would cause a 404 error.
-    # Instead, if the parameter is in query, an empty response body would be given (probably  database select returns nothing).
-    def __init__(self, cache: "SqliteCache" = ...) -> None:
+    # Instead, if the parameter is in query, an empty response body would be given (probably database select returns nothing).
+
+    # TODO: give priorities to different checks
+    ## e.g. esi_requests.get("/markets/{region_id}/order/", region_id=123, type_id=[-1])
+    ## should check region_id first, then type_id.
+    # TODO: different response generation rules
+    ## e.g. esi_requests.get("/universe/types/{type_id}/", type_id=-1) -> 404
+    ## e.g. esi_requests.get("/markets/{region_id}/order/", region_id=10000002, type_id=[-1]) -> 200, empty response body
+    def __init__(self) -> None:
         self.enabled = True
         self.raise_flag = False
 
         self.endpoints_checker = ESIEndpointChecker()
         self.metadata_parser = ESIMetadata()
 
-        self.cache = SqliteCache("request_cache", "request_checker") if cache is Ellipsis else cache
+        self.cache = SqliteCache("request_cache", "request_checker")
         self.invTypes = self.__load_sde()
 
         self._requests_made = 0  # just for fun
         self.__async_session = None
-
-    def generate(self, request: "PreparedESIRequest") -> "ESIResponse":
-        """Generates a fake response for a given PreparedESIRequest.
-
-        Returns:
-            ESIResponse: a fake response for a given request.
-        """
-        return ESIResponse()
 
     async def __call__(self, request: "PreparedESIRequest", raise_flag: bool = False) -> bool:
         if not self.enabled:
@@ -125,12 +118,6 @@ class ESIRequestChecker(metaclass=_NonOverridable):
 
         metadata = self.metadata_parser(request.endpoint)
 
-        # Check endpoint status
-        if valid and self.endpoints_checker.enabled:
-            valid = self.endpoints_checker(request.endpoint)
-            if not valid:
-                error = EndpointDownError(request.endpoint)
-
         # Check type_id in query
         if valid:
             if "type_id" in request.kwargs:
@@ -141,7 +128,7 @@ class ESIRequestChecker(metaclass=_NonOverridable):
                 type_id = None
 
             # If "type_id" not required by this endpoint, just ignore checking
-            if "type_id" in metadata.parameters:  
+            if "type_id" in metadata.parameters:
                 if type_id is None and not metadata.parameters["type_id"].required:
                     # sometimes type_id = None is valid, so no check
                     valid = True
@@ -150,7 +137,7 @@ class ESIRequestChecker(metaclass=_NonOverridable):
             if not valid:
                 error = InvalidRequestError("type_id", type_id)
 
-        # other tests: if valid and "xxx" in api_request.params:
+        # Raise error if necessary
         if not valid:
             self.__log(request)
             # request.blocked = True
@@ -250,10 +237,10 @@ class ESIEndpointChecker:
     def fd_expired(self) -> bool:
         return (self.status_parsed is None or len(self.status_parsed) == 0) or (
             os.path.exists(self.fd_path) and os.path.getmtime(self.fd_path) - time() > 60
-        )
+        )  # ESI server's status.json expires every 60 seconds
 
-    def __call__(self, endpoint: str) -> bool:
-
+    def check(self, endpoint: str) -> bool:
+        """Checks if an endpoint is available."""
         # If no local status.json, or local version expired, retrieve from ESI
         if self.fd_expired:
             resp = requests.get(self.target_url)
@@ -273,13 +260,12 @@ class ESIEndpointChecker:
 class FakeResponseGenerator:
 
     def __init__(self):
-        self.cache: Dict[ESIRequest, ESIResponse] = {}
+        self.cache = SqliteCache("request_cache", "resp_generator")
+
+        self.__async_session = None
 
     def __call__(self, *args, **kwargs):
         return self.generate()
-
-    def ready(self, request: "PreparedESIRequest") -> bool:
-        return False
 
     def generate(self, request: "PreparedESIRequest") -> "ESIResponse":
         """Generates a fake response for a given PreparedESIRequest.
@@ -287,4 +273,5 @@ class FakeResponseGenerator:
         Returns:
             ESIResponse: a fake response for a given request.
         """
+        self.cache.get(request.endpoint)
         return ESIResponse()
