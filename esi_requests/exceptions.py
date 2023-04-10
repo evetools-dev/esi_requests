@@ -42,4 +42,4 @@ class EndpointDownError(Exception):
         self.key = endpoint_key
 
     def __str__(self) -> str:
-        return f"Endpoint {self.key} is down"
+        return f"Endpoint {self.key} is not available."
